@@ -1,0 +1,82 @@
+name: Remote Multi-Repo Build and AWS Deploy
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  orchestrate-deployment:
+    runs-on: ubuntu-latest
+
+    steps:
+    # 1. Pull down the configuration orchestration files (Dockerfile, nginx.conf, etc.)
+    - name: Checkout Configuration Orchestrator Repo
+      uses: actions/checkout@v4
+
+    # 2. Authenticate and pull the Hardened Game codebase from its separate repository
+    - name: Checkout Hardened RuhRohgue Game Code
+      uses: actions/checkout@v4
+      with:
+        repository: 'YOUR_GITHUB_USERNAME/repo-app1-ruhrohgue'
+        token: ${{ secrets.DEPENDENCY_GITHUB_TOKEN }}
+        path: 'build-dir-app1'
+
+    # 3. Authenticate and pull the Placeholder app codebase from its separate repository
+    - name: Checkout Placeholder Application Code
+      uses: actions/checkout@v4
+      with:
+        repository: 'YOUR_GITHUB_USERNAME/repo-app2-placeholder'
+        token: ${{ secrets.DEPENDENCY_GITHUB_TOKEN }}
+        path: 'build-dir-app2'
+
+    # 4. Provision Corretto Java 17 environment tools on the GitHub runner
+    - name: Setup Amazon Corretto JDK 17
+      uses: actions/setup-java@v4
+      with:
+        java-version: '17'
+        distribution: 'corretto'
+        cache: 'maven'
+
+    # 5. Compile App 1 and stage it as app1.jar in the flat deployment workspace root
+    - name: Compile and Stage App 1
+      run: |
+        cd build-dir-app1
+        mvn clean package -DskipTests
+        cp target/ruhrohgue.jar ../app1.jar
+
+    # 6. Compile App 2 and stage it as app2.jar in the flat deployment workspace root
+    - name: Compile and Stage App 2
+      run: |
+        cd build-dir-app2
+        mvn clean package -DskipTests
+        # Matches the expected compiled output artifact name configured in your pom.xml
+        cp target/*.jar ../app2.jar 
+
+    # 7. Discard raw code directories to keep the Elastic Beanstalk ZIP package small
+    - name: Discard Code Source Buffers
+      run: rm -rf build-dir-app1 build-dir-app2
+
+    # 8. Package deployment artifacts into a flat Elastic Beanstalk compliant package
+    - name: Compress Multi-App Elastic Beanstalk Bundle
+      run: zip -r deployment.zip Dockerfile nginx.conf entrypoint.sh Dockerrun.aws.json app1.jar app2.jar
+
+    # 9. Inject secure AWS IAM credentials collected from repository secrets
+    - name: Inject AWS IAM Authentication
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: 'eu-central-1' # Replace with your exact deployment region (e.g., eu-west-1)
+
+    # 10. Direct the compressed bundle straight to your Single-Instance environment
+    - name: Ship Bundle to AWS Elastic Beanstalk
+      uses: einaregilsson/beanstalk-deploy@v22
+      with:
+        aws_access_key: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws_secret_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        application_name: 'YOUR_AWS_BEANSTALK_APPLICATION_NAME'
+        environment_name: 'YOUR_AWS_BEANSTALK_ENVIRONMENT_NAME'
+        version_label: 'release-${{ github.sha }}'
+        region: 'eu-central-1' # Must match region configuration from step 9
+        deployment_package: 'deployment.zip'

@@ -1,0 +1,28 @@
+# ==========================================
+# RuhRohgue Multi-App Deployment GitIgnore
+# ==========================================
+
+# Ignore compiled application binaries generated during staging
+*.jar
+*.war
+*.ear
+
+# Ignore packaged deployment bundles
+*.zip
+*.tar.gz
+*.tgz
+
+# Ignore automated temporary build/source checkout directories
+/build-dir-app1/
+/build-dir-app2/
+/target/
+
+# Ignore local OS metadata
+.DS_Store
+Thumbs.db
+
+# Ignore IDE specific configuration folders
+/.idea/
+/.vscode/
+*.swp
+*.log
