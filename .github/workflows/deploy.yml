@@ -50,22 +50,22 @@ jobs:
     - name: Compress Multi-App Elastic Beanstalk Bundle
       run: zip -r deployment.zip Dockerfile nginx.conf entrypoint.sh Dockerrun.aws.json app1.jar app2.jar
 
-    # 8. Inject secure AWS IAM credentials
+    # 8. Inject secure AWS IAM credentials (UPDATED TO PARIS)
     - name: Inject AWS IAM Authentication
       uses: aws-actions/configure-aws-credentials@v4
       with:
         aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
         aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        aws-region: 'eu-central-1'
+        aws-region: 'eu-west-3'
 
-    # 9. Ship Bundle to AWS Elastic Beanstalk
+    # 9. Ship Bundle to AWS Elastic Beanstalk (UPDATED TO PARIS & REQUIRES YOUR CONSOLE NAMES)
     - name: Ship Bundle to AWS Elastic Beanstalk
       uses: einaregilsson/beanstalk-deploy@v22
       with:
         aws_access_key: ${{ secrets.AWS_ACCESS_KEY_ID }}
         aws_secret_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        application_name: 'YOUR_AWS_BEANSTALK_APPLICATION_NAME'
-        environment_name: 'YOUR_AWS_BEANSTALK_ENVIRONMENT_NAME'
+        application_name: 'RuhRohgue-Production'  # <-- CHANGE THIS
+        environment_name: 'RuhRohgue-Production-env'  # <-- CHANGE THIS
         version_label: 'release-${{ github.sha }}'
-        region: 'eu-central-1'
+        region: 'eu-west-3'
         deployment_package: 'deployment.zip'
