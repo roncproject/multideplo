@@ -10,11 +10,11 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    # 1. Pull down the configuration orchestration files
+    # 1. Pull down the configuration orchestration files from this repo
     - name: Checkout Configuration Orchestrator Repo
       uses: actions/checkout@v4
 
-    # 2. Authenticate and pull ONLY the Hardened Game codebase
+    # 2. Authenticate and pull ONLY the Hardened Game codebase using your PAT
     - name: Checkout Hardened RuhRohgue Game Code
       uses: actions/checkout@v4
       with:
@@ -22,7 +22,7 @@ jobs:
         token: ${{ secrets.DEPENDENCY_GITHUB_TOKEN }}
         path: 'build-dir-app1'
 
-    # 3. Provision Corretto Java 17 environment tools
+    # 3. Provision Corretto Java 17 environment tools for compiling and running tests
     - name: Setup Amazon Corretto JDK 17
       uses: actions/setup-java@v4
       with:
@@ -30,27 +30,39 @@ jobs:
         distribution: 'corretto'
         cache: 'maven'
 
-    # 4. Compile App 1 (Hardened Game)
+    # 4. Compile App 1 (Hardened Game) using Maven
     - name: Compile and Stage Hardened Game
       run: |
         cd build-dir-app1
         mvn clean package -DskipTests
         cp target/ruhrohgue.jar ../app1.jar
 
-    # 5. Discard raw code directory
+    # 5. START PRE-CLOUDFLARE LOCAL ACCEPTANCE TEST SERVER (Bypasses Cloudflare constraints)
+    - name: Launch Pre-Cloudflare Local Acceptance Server
+      run: |
+        java -Dserver.port=8081 -Xmx512m -jar app1.jar &
+        echo "Waiting for local Java server to wake up on port 8081..."
+        sleep 12
+
+    # 6. EXECUTE NATIVE JAVA PLAYWRIGHT + PAGE OBJECT MODEL GATE
+    - name: Execute Java Page Object Acceptance Test Suite
+      run: |
+        cd tests-e2e
+        mvn test
+
+    # 7. Discard raw code directory (Only executed if the E2E quality gate passes successfully)
     - name: Discard Code Source Buffer
       run: rm -rf build-dir-app1
 
-    # 6. Create a lightweight static placeholder for App 2
-    # This prevents the Dockerfile from breaking, but takes 0MB memory and runs no code!
+    # 8. Create a lightweight static placeholder for App 2 to ensure Docker building compliance
     - name: Create Dummy Placeholder for App 2
       run: echo "Not running" > app2.jar
 
-    # 7. Package deployment artifacts
+    # 9. Package deployment artifacts into a production-ready bundle
     - name: Compress Multi-App Elastic Beanstalk Bundle
       run: zip -r deployment.zip Dockerfile nginx.conf entrypoint.sh Dockerrun.aws.json app1.jar app2.jar
 
-    # 8. Inject secure AWS IAM credentials (UPDATED TO PARIS)
+    # 10. Inject secure AWS IAM credentials targeting the active Paris zone
     - name: Inject AWS IAM Authentication
       uses: aws-actions/configure-aws-credentials@v4
       with:
@@ -58,14 +70,14 @@ jobs:
         aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         aws-region: 'eu-west-3'
 
-    # 9. Ship Bundle to AWS Elastic Beanstalk (UPDATED TO PARIS & REQUIRES YOUR CONSOLE NAMES)
+    # 11. Ship Verified Bundle directly onto your Paris Single-Instance environment
     - name: Ship Bundle to AWS Elastic Beanstalk
       uses: einaregilsson/beanstalk-deploy@v22
       with:
         aws_access_key: ${{ secrets.AWS_ACCESS_KEY_ID }}
         aws_secret_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        application_name: 'RuhRohgue-Production'  # <-- CHANGE THIS
-        environment_name: 'RuhRohgue-Production-env'  # <-- CHANGE THIS
+        application_name: 'RuhRohgue-Production'
+        environment_name: 'RuhRohgue-Production-env'
         version_label: 'release-${{ github.sha }}'
         region: 'eu-west-3'
         deployment_package: 'deployment.zip'
