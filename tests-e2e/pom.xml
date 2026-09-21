@@ -14,7 +14,7 @@
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     </properties>
 
-    <dependencies>
+       <dependencies>
         <!-- Playwright Java Core -->
         <dependency>
             <groupId>com.microsoft.playwright</groupId>
@@ -29,7 +29,7 @@
             <version>7.15.0</version>
             <scope>test</scope>
         </dependency>
-        <!-- Cucumber JUnit Engine (om de tests te runnen via Maven) -->
+        <!-- Cucumber JUnit Engine -->
         <dependency>
             <groupId>io.cucumber</groupId>
             <artifactId>cucumber-junit-platform-engine</artifactId>
@@ -42,7 +42,22 @@
             <version>1.10.1</version>
             <scope>test</scope>
         </dependency>
+        
+        <!-- ── DE TWEE ONTBREKENDE JUNIT 5 GENERATORS FIX ────────────────── -->
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter-api</artifactId>
+            <version>5.10.1</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter-engine</artifactId>
+            <version>5.10.1</version>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
+
 
     <build>
         <plugins>
