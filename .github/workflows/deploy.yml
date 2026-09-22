@@ -50,11 +50,27 @@ jobs:
         cd build-dir-app1/tests/e2e
         mvn test
 
-    # 6b. EXECUTE POSTMAN API SECURITY FLOOD GATE VIA NEWMAN (Sourced directly from the app repository path)
+    # 6b. EXECUTE POSTMAN API SECURITY FLOOD GATE + HTML REPORT GENERATION
     - name: Execute Postman API Rate-Limit Security Gate
       run: |
-        npm install -g newman
-        newman run build-dir-app1/tests/api/RuhRohgue_Postman_Collection.json --env-var "baseUrl=http://localhost:8081" -n 50
+        npm install -g newman newman-reporter-htmlextra
+        mkdir -p test-reports/api
+        newman run build-dir-app1/tests/api/RuhRohgue_Postman_Collection.json \
+          --env-var "baseUrl=http://localhost:8081" \
+          -n 50 \
+          --reporters cli,htmlextra \
+          --reporter-htmlextra-export test-reports/api/security_report.html
+
+    # 6c. ARCHIVE AND UPLOAD TEST ARTIFACTS (Runs always, even if previous test steps failed!)
+    - name: Archive and Upload Unified Test Dashboards
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: RuhRohgue-Acceptance-Reports
+        path: |
+          build-dir-app1/tests/e2e/target/surefire-reports/
+          test-reports/api/
+        retention-days: 7
 
     # 7. Discard raw code directory (Only executed if ALL quality gates pass successfully)
     - name: Discard Code Source Buffer
