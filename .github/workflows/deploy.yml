@@ -44,13 +44,19 @@ jobs:
         echo "Waiting for local Java server to wake up on port 8081..."
         sleep 12
 
-    # 6. EXECUTE NATIVE JAVA PLAYWRIGHT + PAGE OBJECT MODEL GATE
+    # 6. EXECUTE PLAYWRIGHT POM TESTS (Sourced directly from the app repository path)
     - name: Execute Java Page Object Acceptance Test Suite
       run: |
-        cd tests-e2e
+        cd build-dir-app1/tests/e2e
         mvn test
 
-    # 7. Discard raw code directory (Only executed if the E2E quality gate passes successfully)
+    # 6b. EXECUTE POSTMAN API SECURITY FLOOD GATE VIA NEWMAN (Sourced directly from the app repository path)
+    - name: Execute Postman API Rate-Limit Security Gate
+      run: |
+        npm install -g newman
+        newman run build-dir-app1/tests/api/RuhRohgue_Postman_Collection.json --env-var "baseUrl=http://localhost:8081" -n 50
+
+    # 7. Discard raw code directory (Only executed if ALL quality gates pass successfully)
     - name: Discard Code Source Buffer
       run: rm -rf build-dir-app1
 
