@@ -1,0 +1,49 @@
+name: Cleanup Orphaned Acceptance Environments
+
+# Safety net for the acceptance job in deploy.yml: its own teardown step runs
+# `if: always()`, but a run that gets killed hard enough (runner lost, Actions
+# outage) can skip even that. This sweep is what actually guarantees nothing
+# named ruhrohgue-acc-* survives for long, independent of how deploy.yml's own
+# run ended.
+
+on:
+  schedule:
+    - cron: '*/30 * * * *'
+  workflow_dispatch: {}
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: eu-west-3
+  EB_APPLICATION: RuhRohgue-Production
+  MAX_AGE_SECONDS: 7200
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Assume AWS Deploy Role (OIDC)
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Terminate Acceptance Environments Older Than Two Hours
+      run: |
+        NOW=$(date -u +%s)
+        aws elasticbeanstalk describe-environments \
+          --application-name "${EB_APPLICATION}" \
+          --query "Environments[?starts_with(EnvironmentName, 'ruhrohgue-acc-') && Status != 'Terminated' && Status != 'Terminating'].[EnvironmentName,DateCreated]" \
+          --output text | while IFS=$'\t' read -r NAME CREATED; do
+            [ -z "${NAME}" ] && continue
+            CREATED_EPOCH=$(date -u -d "${CREATED}" +%s)
+            AGE=$(( NOW - CREATED_EPOCH ))
+            if [ "${AGE}" -gt "${MAX_AGE_SECONDS}" ]; then
+              echo "Terminating orphaned acceptance environment: ${NAME} (age ${AGE}s)"
+              aws elasticbeanstalk terminate-environment --environment-name "${NAME}" || true
+            else
+              echo "Leaving ${NAME} alone (age ${AGE}s, under threshold)"
+            fi
+          done
