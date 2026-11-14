@@ -188,6 +188,7 @@ jobs:
             Namespace=aws:autoscaling:asg,OptionName=MinSize,Value=1 \
             Namespace=aws:autoscaling:asg,OptionName=MaxSize,Value=1 \
             Namespace=aws:elasticbeanstalk:environment,OptionName=EnvironmentType,Value=SingleInstance \
+            Namespace=aws:elasticbeanstalk:environment,OptionName=ServiceRole,Value=aws-elasticbeanstalk-service-role \
             Namespace=aws:ec2:instances,OptionName=InstanceTypes,Value="${{ steps.prod.outputs.instance_type }}" \
             Namespace=aws:autoscaling:launchconfiguration,OptionName=IamInstanceProfile,Value="${{ steps.prod.outputs.iam_profile }}" \
             Namespace=aws:elasticbeanstalk:application:environment,OptionName=SCORES_S3_BUCKET,Value="${{ steps.register.outputs.bucket }}" \
