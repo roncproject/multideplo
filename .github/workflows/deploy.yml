@@ -193,11 +193,26 @@ jobs:
             Namespace=aws:elasticbeanstalk:application:environment,OptionName=SCORES_S3_BUCKET,Value="${{ steps.register.outputs.bucket }}" \
             Namespace=aws:elasticbeanstalk:application:environment,OptionName=SCORES_S3_KEY,Value="${{ steps.vars.outputs.scores_key }}"
 
+    # The built-in "environment-updated" waiter only polls for ~3-4 minutes
+    # (5s x 40 tries), which is fine for updating an existing environment
+    # but too short for a brand-new one's first EC2 launch + Docker
+    # bootstrap. Poll manually with a longer budget instead.
     - name: Wait for Environment Ready
       run: |
-        aws elasticbeanstalk wait environment-updated \
-          --application-name "${EB_APPLICATION}" \
-          --environment-names "${{ steps.vars.outputs.env_name }}"
+        for i in $(seq 1 60); do
+          STATUS=$(aws elasticbeanstalk describe-environments \
+            --application-name "${EB_APPLICATION}" \
+            --environment-names "${{ steps.vars.outputs.env_name }}" \
+            --query 'Environments[0].Status' --output text)
+          echo "Environment status: ${STATUS} (check ${i}/60)"
+          if [ "${STATUS}" = "Ready" ]; then
+            echo "Environment is ready."
+            exit 0
+          fi
+          sleep 15
+        done
+        echo "Environment never reached Ready within 15 minutes" >&2
+        exit 1
 
     - name: Resolve Acceptance URL and Wait for Health
       id: health
