@@ -5,16 +5,28 @@ on:
     branches:
       - main
 
-jobs:
-  orchestrate-deployment:
-    runs-on: ubuntu-latest
+# Two pushes landing close together must not both reach the production
+# update-environment call - the second would race the first's in-flight
+# deploy. Queue them instead of cancelling: a deploy already underway should
+# finish, not be abandoned mid-update.
+concurrency:
+  group: ruhrohgue-production-deploy
+  cancel-in-progress: false
 
+env:
+  AWS_REGION: eu-west-3
+  EB_APPLICATION: RuhRohgue-Production
+  PRODUCTION_ENV: RuhRohgue-Production-env
+
+jobs:
+  # 1. Build the bundle and run the fast, local-process gates. Identical to
+  #    the pre-WISH-05 single job, minus the AWS deploy step at the end.
+  build:
+    runs-on: ubuntu-latest
     steps:
-    # 1. Pull down the configuration orchestration files from this repo
     - name: Checkout Configuration Orchestrator Repo
       uses: actions/checkout@v4
 
-    # 2. Authenticate and pull ONLY the Hardened Game codebase using your PAT
     - name: Checkout Hardened RuhRohgue Game Code
       uses: actions/checkout@v4
       with:
@@ -22,7 +34,6 @@ jobs:
         token: ${{ secrets.DEPENDENCY_GITHUB_TOKEN }}
         path: 'build-dir-app1'
 
-    # 3. Provision Corretto Java 17 environment tools for compiling and running tests
     - name: Setup Amazon Corretto JDK 17
       uses: actions/setup-java@v4
       with:
@@ -30,76 +41,270 @@ jobs:
         distribution: 'corretto'
         cache: 'maven'
 
-    # 4. Compile App 1 (Hardened Game) using Maven
     - name: Compile and Stage Hardened Game
       run: |
         cd build-dir-app1
         mvn clean package -DskipTests
         cp target/ruhrohgue.jar ../app1.jar
 
-    # 5. START PRE-CLOUDFLARE LOCAL ACCEPTANCE TEST SERVER (Bypasses Cloudflare constraints)
-    - name: Launch Pre-Cloudflare Local Acceptance Server
+    - name: Launch Pre-Cloudflare Local Smoke Server
       run: |
         java -Dserver.port=8081 -Xmx512m -jar app1.jar &
         echo "Waiting for local Java server to wake up on port 8081..."
         sleep 12
 
-    # 6. EXECUTE PLAYWRIGHT POM TESTS (Sourced directly from the app repository path)
-    - name: Execute Java Page Object Acceptance Test Suite
+    - name: Execute Java Page Object Smoke Test Suite
       run: |
         cd build-dir-app1/tests/e2e
         mvn test
 
-    # 6b. EXECUTE POSTMAN API SECURITY FLOOD GATE + HTML REPORT GENERATION
-    - name: Execute Postman API Rate-Limit Security Gate
+    - name: Execute Postman API Rate-Limit Smoke Gate
       run: |
         npm install -g newman newman-reporter-htmlextra
-        mkdir -p test-reports/api
+        mkdir -p test-reports/api-local
         newman run build-dir-app1/tests/api/RuhRohgue_Postman_Collection.json \
           --env-var "baseUrl=http://localhost:8081" \
           -n 50 \
           --reporters cli,htmlextra \
-          --reporter-htmlextra-export test-reports/api/security_report.html
+          --reporter-htmlextra-export test-reports/api-local/security_report.html
 
-    # 6c. ARCHIVE AND UPLOAD TEST ARTIFACTS (Runs always, even if previous test steps failed!)
-    - name: Archive and Upload Unified Test Dashboards
+    - name: Archive and Upload Local Gate Reports
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: RuhRohgue-Local-Gate-Reports
+        path: |
+          build-dir-app1/tests/e2e/target/surefire-reports/
+          test-reports/api-local/
+        retention-days: 7
+
+    - name: Discard Code Source Buffer
+      run: rm -rf build-dir-app1
+
+    - name: Create Dummy Placeholder for App 2
+      run: echo "Not running" > app2.jar
+
+    - name: Compress Multi-App Elastic Beanstalk Bundle
+      run: zip -r deployment.zip Dockerfile nginx.conf entrypoint.sh Dockerrun.aws.json app1.jar app2.jar
+
+    # The acceptance and deploy jobs both need these exact bytes - rebuilding
+    # the zip in a later job would mean production ships something that was
+    # never the thing acceptance actually tested.
+    - name: Upload Deployment Bundle
+      uses: actions/upload-artifact@v4
+      with:
+        name: deployment-bundle
+        path: deployment.zip
+        retention-days: 1
+
+  # 2. Stand up a real, single-instance Elastic Beanstalk environment running
+  #    the exact bundle from step 1, run the same test suites against it over
+  #    plain HTTP (never through Cloudflare - its bot challenge blocks
+  #    scripted POSTs, see ruhrohgue#14), then always tear it down.
+  acceptance:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+    - name: Checkout RuhRohgue Test Sources
+      uses: actions/checkout@v4
+      with:
+        repository: 'roncproject/ruhrohgue'
+        token: ${{ secrets.DEPENDENCY_GITHUB_TOKEN }}
+        path: 'build-dir-app1'
+
+    - name: Download Deployment Bundle
+      uses: actions/download-artifact@v4
+      with:
+        name: deployment-bundle
+
+    - name: Compute Acceptance Names
+      id: vars
+      run: |
+        ENV_NAME="ruhrohgue-acc-${{ github.run_id }}"
+        echo "env_name=${ENV_NAME}" >> "$GITHUB_OUTPUT"
+        echo "cname_prefix=${ENV_NAME}" >> "$GITHUB_OUTPUT"
+        echo "version_label=acceptance-${{ github.run_id }}" >> "$GITHUB_OUTPUT"
+        echo "scores_key=acceptance/${ENV_NAME}/scores.json" >> "$GITHUB_OUTPUT"
+
+    # OIDC: no long-lived keys. Role trust policy is scoped to this repo and
+    # the main branch (AWS console setup, tracked in WISH-05's checklist).
+    - name: Assume AWS Deploy Role (OIDC)
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Upload Bundle and Register Acceptance Application Version
+      id: register
+      run: |
+        BUCKET=$(aws elasticbeanstalk create-storage-location --query 'S3Bucket' --output text)
+        S3_KEY="acceptance/${{ steps.vars.outputs.version_label }}/deployment.zip"
+        aws s3 cp deployment.zip "s3://${BUCKET}/${S3_KEY}"
+        aws elasticbeanstalk create-application-version \
+          --application-name "${EB_APPLICATION}" \
+          --version-label "${{ steps.vars.outputs.version_label }}" \
+          --source-bundle S3Bucket="${BUCKET}",S3Key="${S3_KEY}"
+        echo "bucket=${BUCKET}" >> "$GITHUB_OUTPUT"
+
+    # Instance type and instance profile are read from the live production
+    # environment rather than hard-coded, so this never silently drifts out
+    # of sync with whatever production actually runs.
+    - name: Read Production Environment Shape
+      id: prod
+      run: |
+        SETTINGS=$(aws elasticbeanstalk describe-configuration-settings \
+          --application-name "${EB_APPLICATION}" \
+          --environment-name "${PRODUCTION_ENV}")
+        INSTANCE_TYPE=$(echo "$SETTINGS" | jq -r '.ConfigurationSettings[0].OptionSettings[]
+          | select(.Namespace=="aws:ec2:instances" and .OptionName=="InstanceTypes") | .Value' | cut -d, -f1)
+        IAM_PROFILE=$(echo "$SETTINGS" | jq -r '.ConfigurationSettings[0].OptionSettings[]
+          | select(.Namespace=="aws:autoscaling:launchconfiguration" and .OptionName=="IamInstanceProfile") | .Value')
+        echo "instance_type=${INSTANCE_TYPE}" >> "$GITHUB_OUTPUT"
+        echo "iam_profile=${IAM_PROFILE}" >> "$GITHUB_OUTPUT"
+
+    - name: Resolve Docker Solution Stack
+      id: stack
+      run: |
+        STACK=$(aws elasticbeanstalk list-available-solution-stacks \
+          --query "SolutionStacks[?contains(@, 'running Docker') && contains(@, 'Amazon Linux 2023')] | [0]" \
+          --output text)
+        echo "stack=${STACK}" >> "$GITHUB_OUTPUT"
+
+    - name: Create Acceptance Environment
+      run: |
+        aws elasticbeanstalk create-environment \
+          --application-name "${EB_APPLICATION}" \
+          --environment-name "${{ steps.vars.outputs.env_name }}" \
+          --cname-prefix "${{ steps.vars.outputs.cname_prefix }}" \
+          --solution-stack-name "${{ steps.stack.outputs.stack }}" \
+          --version-label "${{ steps.vars.outputs.version_label }}" \
+          --option-settings \
+            Namespace=aws:autoscaling:asg,OptionName=MinSize,Value=1 \
+            Namespace=aws:autoscaling:asg,OptionName=MaxSize,Value=1 \
+            Namespace=aws:elasticbeanstalk:environment,OptionName=EnvironmentType,Value=SingleInstance \
+            Namespace=aws:ec2:instances,OptionName=InstanceTypes,Value="${{ steps.prod.outputs.instance_type }}" \
+            Namespace=aws:autoscaling:launchconfiguration,OptionName=IamInstanceProfile,Value="${{ steps.prod.outputs.iam_profile }}" \
+            Namespace=aws:elasticbeanstalk:application:environment,OptionName=SCORES_S3_BUCKET,Value="${{ steps.register.outputs.bucket }}" \
+            Namespace=aws:elasticbeanstalk:application:environment,OptionName=SCORES_S3_KEY,Value="${{ steps.vars.outputs.scores_key }}"
+
+    - name: Wait for Environment Ready
+      run: |
+        aws elasticbeanstalk wait environment-updated \
+          --application-name "${EB_APPLICATION}" \
+          --environment-names "${{ steps.vars.outputs.env_name }}"
+
+    - name: Resolve Acceptance URL and Wait for Health
+      id: health
+      run: |
+        CNAME=$(aws elasticbeanstalk describe-environments \
+          --application-name "${EB_APPLICATION}" \
+          --environment-names "${{ steps.vars.outputs.env_name }}" \
+          --query 'Environments[0].CNAME' --output text)
+        ACCEPTANCE_URL="http://${CNAME}"
+        echo "acceptance_url=${ACCEPTANCE_URL}" >> "$GITHUB_OUTPUT"
+        for i in $(seq 1 20); do
+          if curl -fs "${ACCEPTANCE_URL}/actuator/health"; then
+            echo "Acceptance environment is healthy."
+            exit 0
+          fi
+          sleep 10
+        done
+        echo "Acceptance environment never reported healthy" >&2
+        exit 1
+
+    - name: Setup Amazon Corretto JDK 17
+      uses: actions/setup-java@v4
+      with:
+        java-version: '17'
+        distribution: 'corretto'
+        cache: 'maven'
+
+    # Requires the acceptance.url system property added in ruhrohgue#31
+    # (WISH-11) - without it this suite only knows how to hit localhost:8081.
+    - name: Run Playwright e2e Suite Against Acceptance Environment
+      run: |
+        cd build-dir-app1/tests/e2e
+        mvn test -Dacceptance.url="${{ steps.health.outputs.acceptance_url }}"
+
+    - name: Run Postman Suite Against Acceptance Environment
+      run: |
+        npm install -g newman newman-reporter-htmlextra
+        mkdir -p test-reports/api-acceptance
+        newman run build-dir-app1/tests/api/RuhRohgue_Postman_Collection.json \
+          --env-var "baseUrl=${{ steps.health.outputs.acceptance_url }}" \
+          -n 50 \
+          --reporters cli,htmlextra \
+          --reporter-htmlextra-export test-reports/api-acceptance/security_report.html
+
+    - name: Archive Acceptance Test Reports
       if: always()
       uses: actions/upload-artifact@v4
       with:
         name: RuhRohgue-Acceptance-Reports
         path: |
           build-dir-app1/tests/e2e/target/surefire-reports/
-          test-reports/api/
+          test-reports/api-acceptance/
         retention-days: 7
 
-    # 7. Discard raw code directory (Only executed if ALL quality gates pass successfully)
-    - name: Discard Code Source Buffer
-      run: rm -rf build-dir-app1
+    # Always, including on a failed or cancelled run: nothing named
+    # ruhrohgue-acc-* may outlive this job.
+    - name: Tear Down Acceptance Environment
+      if: always()
+      run: |
+        aws elasticbeanstalk terminate-environment \
+          --environment-name "${{ steps.vars.outputs.env_name }}" || true
+        aws elasticbeanstalk wait environment-terminated \
+          --application-name "${EB_APPLICATION}" \
+          --environment-names "${{ steps.vars.outputs.env_name }}" || true
 
-    # 8. Create a lightweight static placeholder for App 2 to ensure Docker building compliance
-    - name: Create Dummy Placeholder for App 2
-      run: echo "Not running" > app2.jar
+    - name: Delete Acceptance Score Object and Application Version
+      if: always()
+      run: |
+        aws s3 rm "s3://${{ steps.register.outputs.bucket }}/${{ steps.vars.outputs.scores_key }}" || true
+        aws elasticbeanstalk delete-application-version \
+          --application-name "${EB_APPLICATION}" \
+          --version-label "${{ steps.vars.outputs.version_label }}" \
+          --delete-source-bundle || true
 
-    # 9. Package deployment artifacts into a production-ready bundle
-    - name: Compress Multi-App Elastic Beanstalk Bundle
-      run: zip -r deployment.zip Dockerfile nginx.conf entrypoint.sh Dockerrun.aws.json app1.jar app2.jar
+  # 3. Only reached if acceptance passed. Ships the exact bundle that was
+  #    just tested on real infrastructure - never a rebuild.
+  deploy:
+    needs: acceptance
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+    - name: Download Deployment Bundle
+      uses: actions/download-artifact@v4
+      with:
+        name: deployment-bundle
 
-    # 10. Inject secure AWS IAM credentials targeting the active Paris zone
-    - name: Inject AWS IAM Authentication
+    - name: Assume AWS Deploy Role (OIDC)
       uses: aws-actions/configure-aws-credentials@v4
       with:
-        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        aws-region: 'eu-west-3'
+        role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+        aws-region: ${{ env.AWS_REGION }}
 
-    # 11. Ship Verified Bundle directly onto your Paris Single-Instance environment
+    - name: Upload Bundle and Register Production Application Version
+      run: |
+        BUCKET=$(aws elasticbeanstalk create-storage-location --query 'S3Bucket' --output text)
+        S3_KEY="releases/release-${{ github.sha }}/deployment.zip"
+        aws s3 cp deployment.zip "s3://${BUCKET}/${S3_KEY}"
+        aws elasticbeanstalk create-application-version \
+          --application-name "${EB_APPLICATION}" \
+          --version-label "release-${{ github.sha }}" \
+          --source-bundle S3Bucket="${BUCKET}",S3Key="${S3_KEY}"
+
     - name: Ship Bundle to AWS Elastic Beanstalk
-      uses: einaregilsson/beanstalk-deploy@v22
-      with:
-        aws_access_key: ${{ secrets.AWS_ACCESS_KEY_ID }}
-        aws_secret_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        application_name: 'RuhRohgue-Production'
-        environment_name: 'RuhRohgue-Production-env'
-        version_label: 'release-${{ github.sha }}'
-        region: 'eu-west-3'
-        deployment_package: 'deployment.zip'
+      run: |
+        aws elasticbeanstalk update-environment \
+          --application-name "${EB_APPLICATION}" \
+          --environment-name "${PRODUCTION_ENV}" \
+          --version-label "release-${{ github.sha }}"
+        aws elasticbeanstalk wait environment-updated \
+          --application-name "${EB_APPLICATION}" \
+          --environment-names "${PRODUCTION_ENV}"
