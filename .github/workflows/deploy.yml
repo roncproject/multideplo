@@ -209,6 +209,16 @@ jobs:
             echo "Environment is ready."
             exit 0
           fi
+          if [ "${STATUS}" = "Terminated" ]; then
+            echo "Environment terminated unexpectedly - dumping its event log:" >&2
+            aws elasticbeanstalk describe-events \
+              --application-name "${EB_APPLICATION}" \
+              --environment-name "${{ steps.vars.outputs.env_name }}" \
+              --max-items 50 \
+              --query 'reverse(sort_by(Events, &EventDate))' \
+              --output table || true
+            exit 1
+          fi
           sleep 15
         done
         echo "Environment never reached Ready within 15 minutes" >&2
