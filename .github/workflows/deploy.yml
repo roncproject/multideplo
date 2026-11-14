@@ -129,6 +129,21 @@ jobs:
         echo "version_label=acceptance-${{ github.run_id }}" >> "$GITHUB_OUTPUT"
         echo "scores_key=acceptance/${ENV_NAME}/scores.json" >> "$GITHUB_OUTPUT"
 
+    # TEMPORARY - debugging the "Not authorized to perform
+    # sts:AssumeRoleWithWebIdentity" failure. Prints the actual claims in the
+    # token this run gets issued, so we can compare them against the role's
+    # trust policy instead of guessing. Nothing printed here is secret - a
+    # GitHub Actions OIDC token's claims are meant to be inspected by whoever
+    # receives the token. Remove this step once the real cause is found.
+    - name: Debug - inspect the OIDC token's claims
+      run: |
+        IDTOKEN=$(curl -sLS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+          "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.amazonaws.com" | jq -r '.value')
+        PAYLOAD=$(echo "$IDTOKEN" | cut -d. -f2)
+        PAYLOAD="${PAYLOAD//-/+}"; PAYLOAD="${PAYLOAD//_//}"
+        while [ $(( ${#PAYLOAD} % 4 )) -ne 0 ]; do PAYLOAD="${PAYLOAD}="; done
+        echo "$PAYLOAD" | base64 -d | jq '{aud, sub, iss, repository, repository_owner, ref, event_name, job_workflow_ref}'
+
     # OIDC: no long-lived keys. Role trust policy is scoped to this repo and
     # the main branch (AWS console setup, tracked in WISH-05's checklist).
     - name: Assume AWS Deploy Role (OIDC)
